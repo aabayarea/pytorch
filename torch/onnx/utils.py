@@ -203,6 +203,45 @@ def _trace_and_get_graph_from_model(model, args, training):
     return trace.graph(), torch_out
 
 
+def _optimize_graph_constant_folding(block, params_dict):
+    # # This method updates the graph in-place to replace
+    # # all the one-time constant-based computations into 
+    # # a constant or initializer node.
+    for node in block.nodes():
+        for nested_block in node.blocks():
+            _optimize_graph_constant_folding(nested_block, params_dict)
+        
+        input_vals = list(node.inputs())
+        input_tensor_values = []
+        for val in input_vals:
+            print(val)
+            input_node = val.node()
+            is_param = input_node.kind() == 'prim::Param'
+            is_constant = input_node.kind() == "prim::Constant" and \
+                not input_node.mustBeNone() and \
+                (input_node.kindOf("value") == "t" or input_node.kindOf("value") == "is")
+            if is_param:
+                input_tensor_values.append(params_dict[val.uniqueName()])
+            elif is_constant:
+                input_tensor_values.append(input_node["value"])
+        if input_tensor_values and len(input_tensor_values) == len(input_vals):
+            # Do folding for this node and delete the node
+            print(input_tensor_values)
+            if node.kind() == 'onnx::Slice':
+                assert len(input_tensor_values) == 1
+                attrs = {k: node[k] for k in node.attributeNames()}
+                updated_val = input_tensor_values[0]
+                for dim, start, end in zip(attrs['axes'], attrs['starts'], attrs['ends']):
+                    updated_val = torch.narrow(updated_val, dim, start, end - start)
+
+
+
+
+
+
+
+    return None
+
 def _model_to_graph(model, args, f, verbose=False, training=False,
                     input_names=None, output_names=None,
                     operator_export_type=OperatorExportTypes.ONNX,
@@ -227,7 +266,10 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
             raise RuntimeError('\'forward\' method must be a script method')
     else:
         graph, torch_out = _trace_and_get_graph_from_model(model, args, training)
+        input_names = [val.uniqueName() for val in graph.inputs()]
         params = list(_unique_state_dict(model).values())
+        param_names = input_names[len(input_names)-len(params):]
+        params_dict = dict(zip(param_names, params))
 
     graph = _optimize_graph(graph, operator_export_type)
 
@@ -242,7 +284,7 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
     if verbose:
         print(graph)
 
-    return graph, params, torch_out
+    return graph, params_dict, torch_out
 
 
 def export_to_pretty_string(model, args, f, export_params=True, verbose=False, training=False,
@@ -284,6 +326,8 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
                                                training, input_names,
                                                output_names, operator_export_type,
                                                example_outputs, propagate)
+
+    _optimize_graph_constant_folding(graph.block(), params)
 
     # TODO: Don't allocate a in-memory string for the protobuf
     from torch.onnx.symbolic import _onnx_opset_version
