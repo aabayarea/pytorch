@@ -207,6 +207,172 @@ def _trace_and_get_graph_from_model(model, args, training):
     return trace.graph(), torch_out
 
 
+def _get_source_node(block):
+    # NOTE: This method returns the first prim::Param node it encounters,
+    # which is fine assuming that there is always one and only one prim::Param
+    # node in a PyTorch IR graph.
+    for node in block.nodes():
+        for val in node.inputs():
+            if val.node().kind() == 'prim::Param':
+                return val.node()
+    
+    raise RuntimeError("Malformed IR graph - did not find any prim::Param node in the block.")
+
+
+def _optimize_graph_constant_folding(block, params_dict):
+    # # This method updates the graph in-place to replace
+    # # all the one-time constant-based computations into 
+    # # a constant or initializer node.
+    class LeafNodes:
+        # Currently only prim::Param and prim::Constant are supported.
+        # More can be added as needed.
+        PRIM_PARAM = 0
+        PRIM_CONSTANT = 1
+        
+    # TODO: Add a while loop to encapsulates this, so that we can 
+    # do two more levels deep constant folding.
+    source_node = _get_source_node(block)
+    for node in block.nodes():
+        for nested_block in node.blocks():
+            _optimize_graph_constant_folding(nested_block, params_dict)
+    
+        input_vals = list(node.inputs())
+        input_tensor_values = []
+        kind_of_leaf_node = [] # Only two states needed for now, hence boolean
+        for val in input_vals:
+            # print(val)
+            input_node = val.node()
+            # The second condition in the statement below is needed because actual
+            # inputs (not params) are also outputs of the prim::Param node.
+            is_param = input_node.kind() == 'prim::Param' and val.uniqueName() in params_dict
+            if is_param:
+                assert input_node is source_node # Always one and only one prim::Param source node in a PTIR graph.
+
+            is_constant = input_node.kind() == "prim::Constant" and \
+                not input_node.mustBeNone() and \
+                (input_node.kindOf("value") == "t" or input_node.kindOf("value") == "is")
+            if is_param:
+                input_tensor_values.append(params_dict[val.uniqueName()])
+                kind_of_leaf_node.append(LeafNodes.PRIM_PARAM)
+            elif is_constant:
+                input_tensor_values.append(input_node["value"])
+                kind_of_leaf_node.append(LeafNodes.PRIM_PARAM)
+
+        if input_tensor_values and len(input_tensor_values) == len(input_vals):
+            # Do folding for this node and delete the node
+            # print(input_tensor_values)
+            if node.kind() == 'onnx::Slice':
+                assert len(input_tensor_values) == 1
+                attrs = {k: node[k] for k in node.attributeNames()}
+                if not ('axes' in attrs and 'starts' in attrs and 'ends' in attrs):
+                    raise RuntimeError('\'onnx::Slice\' node must have attributes \'axes\', \
+                        \'starts\', and \'ends\'.')
+                if (len(attrs['axes']) != len(attrs['starts'])) or \
+                    (len(attrs['axes']) != len(attrs['ends'])):
+                    raise RuntimeError('\'onnx::Slice\' node attributes \'axes\', \
+                        \'starts\', and \'ends\' must have same length.')
+                updated_val = input_tensor_values[0]
+                for dim, start, end in zip(attrs['axes'], attrs['starts'], attrs['ends']):
+                    updated_val = torch.narrow(updated_val, dim, start, end - start)
+            elif node.kind() == 'onnx::Concat':
+                attrs = {k: node[k] for k in node.attributeNames()}
+                updated_val = torch.cat(input_tensor_values, dim=attrs['axis'])
+            elif node.kind() == 'onnx::Unsqueeze':
+                assert len(input_tensor_values) == 1
+                attrs = {k: node[k] for k in node.attributeNames()}
+                if 'axes' not in attrs:
+                    raise RuntimeError('\'onnx::Unsqueeze\' node must have attribute \'axes\'.')
+                updated_val = input_tensor_values[0]
+                for dim in attrs['axes']:
+                    updated_val = torch.unsqueeze(updated_val, dim)
+            elif node.kind() == 'onnx::Transpose':
+                assert len(input_tensor_values) == 1
+                attrs = {k: node[k] for k in node.attributeNames()}
+                if 'axes' not in attrs:
+                    raise RuntimeError('\'onnx::Unsqueeze\' node must have attribute \'axes\'.')
+                updated_val = input_tensor_values[0]
+                for dim in attrs['axes']:
+                    updated_val = torch.unsqueeze(updated_val, dim)
+            else:
+                # Skip this node
+                continue
+            
+            new_source_node_output = source_node.addOutput()
+            params_dict[new_source_node_output.uniqueName()] = updated_val # Assumes 'node' is single output
+            # new_source_node_output.copyMetadata(node.outputsAt(0))
+            new_source_node_output.inferTypeFrom(updated_val)
+            node.outputsAt(0).replaceAllUsesWith(new_source_node_output) # Assumes 'node' is single output
+            # TODO: Shall we copy metadata of the output value above using Value::copyMetadata?
+
+            source_output_names = [source_output.uniqueName() for source_output in source_node.outputs()]
+            idxs_matching_source_output = []
+            for idx, val in enumerate(input_vals):                
+                if kind_of_leaf_node[idx] == LeafNodes.PRIM_PARAM:
+                    # Find the output of the source prim::Param node that corresponds
+                    # to this input, check to see if that output is feeding into any
+                    # other node, and if it is not (given that we replaced it above)
+                    # then delete this output of the prim::Param node, and the corresponding
+                    # entry in params_dict.
+                    
+                    idx_matching_source_output = [i for i in range(len(source_output_names)) \
+                        if source_output_names[i] == val.uniqueName()]
+                    assert len(idx_matching_source_output) == 1 # Only one source output name should match the name of this input (val)
+                    idxs_matching_source_output.append(idx_matching_source_output[0])
+
+            node.removeAllInputs()
+            for node_idx_in_source_output in idxs_matching_source_output:
+                if len(list(source_node.outputsAt(node_idx_in_source_output).uses())) == 0:
+                        # # Delete the particular output of the source prim::Param node
+                        # source_node.eraseOutput(idx_matching_source_output[0])
+                        
+                        # Delete the corresponding entry in params_dict
+                        del params_dict[source_output_names[node_idx_in_source_output]]
+    
+    for k in reversed(range(source_node.outputsSize())):
+        if len(list(source_node.outputsAt(k).uses())) == 0:
+            print(source_node.outputsAt(k).uniqueName())
+            source_node.eraseOutput(k)
+
+    # source_node_outputs = list(source_node.outputs())
+    # output_idxs_to_remove = [j for j in range(len(source_node_outputs)) \
+    #                 if len(list(source_node_outputs[j].uses())) == 0]
+    # for idx_to_remove in output_idxs_to_remove:
+    #     print(source_node_outputs[idx_to_remove].uniqueName())
+    #     source_node.eraseOutput(idx_to_remove)
+    print('Done!')
+            # for idx, val in enumerate(input_vals):                
+            #     if kind_of_leaf_node[idx] == LeafNodes.PRIM_PARAM:
+            #         # Find the output of the source prim::Param node that corresponds
+            #         # to this input, check to see if that output is feeding into any
+            #         # other node, and if it is not (given that we replaced it above)
+            #         # then delete this output of the prim::Param node, and the corresponding
+            #         # entry in params_dict.
+            #         source_output_names = [source_output.uniqueName() for source_output in source_node.outputs()]
+            #         idx_matching_source_output = [i for i in range(len(source_output_names)) \
+            #             if source_output_names[i] == val.uniqueName()]
+            #         assert len(idx_matching_source_output) == 1 # Only one source output name should match the name of this input (val)
+            #         node.removeInput(idx) # Needs to be done here so that in the next line when we check uses(), we get a 0.
+            #         if len(list(source_node.outputsAt(idx_matching_source_output[0]).uses())) == 0:
+            #             # Delete the particular output of the source prim::Param node
+            #             # source_node.eraseOutput(idx_matching_source_output[0])
+            #             # Delete the corresponding entry in params_dict
+            #             del params_dict[source_output_names[idx_matching_source_output[0]]]
+            #     elif kind_of_leaf_node[idx] == LeafNodes.PRIM_CONSTANT:
+            #         print('Encountered prim::Constant node. Nothing to do here.')
+            #         # node.removeAllInputs()
+            #     else:
+            #         raise RuntimeError("Unsupported LeafNodes category encountered during constant folding.")
+            
+            
+            # node.removeAllInputs()
+    # source_node_outputs = list(source_node.outputs())
+    # output_idxs_to_remove = [j for j in range(len(source_node_outputs)) \
+    #                 if len(list(source_node_outputs[j].uses())) == 0]
+    # for idx_to_remove in output_idxs_to_remove:
+    #     print(source_node_outputs[idx_to_remove].uniqueName())
+    #     source_node.eraseOutput(idx_to_remove)
+
+
 def _model_to_graph(model, args, f, verbose=False, training=False,
                     input_names=None, output_names=None,
                     operator_export_type=OperatorExportTypes.ONNX,
@@ -233,6 +399,10 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
         graph, torch_out = _trace_and_get_graph_from_model(model, args, training)
         params = list(_unique_state_dict(model).values())
 
+    input_and_param_names = [val.uniqueName() for val in graph.inputs()]
+    param_names = input_and_param_names[len(input_and_param_names)-len(params):]
+    params_dict = dict(zip(param_names, params))
+
     graph = _optimize_graph(graph, operator_export_type)
 
     # NB: ONNX requires complete information about output types, which might be
@@ -246,7 +416,7 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
     if verbose:
         print(graph)
 
-    return graph, params, torch_out
+    return graph, params_dict, torch_out
 
 
 def export_to_pretty_string(model, args, f, export_params=True, verbose=False, training=False,
@@ -294,15 +464,17 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
     if opset_version is None:
         opset_version = _default_onnx_opset_version
     _set_opset_version(opset_version)
-    graph, params, torch_out = _model_to_graph(model, args, f, verbose,
-                                               training, input_names,
-                                               output_names, operator_export_type,
-                                               example_outputs, propagate)
+    graph, params_dict, torch_out = _model_to_graph(model, args, f, verbose,
+                                                    training, input_names,
+                                                    output_names, operator_export_type,
+                                                    example_outputs, propagate)
+
+    _optimize_graph_constant_folding(graph.block(), params_dict)
 
     # TODO: Don't allocate a in-memory string for the protobuf
     defer_weight_export = export_type is not ExportTypes.PROTOBUF_FILE
     if export_params:
-        proto, export_map = graph._export_onnx(params, opset_version, defer_weight_export, operator_export_type)
+        proto, export_map = graph._export_onnx(params_dict, opset_version, defer_weight_export, operator_export_type)
     else:
         proto, export_map = graph._export_onnx([], opset_version, False, operator_export_type)
 
