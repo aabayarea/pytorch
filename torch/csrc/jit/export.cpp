@@ -124,14 +124,24 @@ class EncoderBase {
   void EncodeGraph(
       onnx::GraphProto* graph_proto,
       const std::shared_ptr<Graph>& graph,
+<<<<<<< HEAD
       const std::map<std::string, at::Tensor>& initializers = 
         std::map<std::string, at::Tensor>());
+=======
+      const std::unordered_map<std::string, at::Tensor>& initializers = 
+        std::unordered_map<std::string, at::Tensor>());
+>>>>>>> Fixing default argument style for unordered_map to fix test failures.
 
   void EncodeBlock(
       onnx::GraphProto* graph_proto,
       const Block* block,
+<<<<<<< HEAD
       const std::map<std::string, at::Tensor>& initializers = 
         std::map<std::string, at::Tensor>());
+=======
+      const std::unordered_map<std::string, at::Tensor>& initializers = 
+        std::unordered_map<std::string, at::Tensor>());
+>>>>>>> Fixing default argument style for unordered_map to fix test failures.
 
   virtual void EncodeTensor(
       onnx::TensorProto* tensor_proto,
