@@ -227,7 +227,7 @@ def _optimize_graph_constant_folding(block, params_dict):
         # Currently only prim::Param and prim::Constant are supported.
         # More can be added as needed.
         PRIM_PARAM = 0
-        PRIM_CONSTANT = 1
+        ONNX_CONSTANT = 1
 
     # TODO: Add a while loop to encapsulates this, so that we can 
     # do two more levels deep constant folding.
@@ -238,17 +238,20 @@ def _optimize_graph_constant_folding(block, params_dict):
 
         input_vals = list(node.inputs())
         input_tensor_values = []
-        kind_of_leaf_node = [] # Only two states needed for now, hence boolean
+        kind_of_leaf_node = [] # Only two states needed for now, hence boolean       
         for val in input_vals:
             # print(val)
             input_node = val.node()
+            # if node.kind() == 'onnx::Unsqueeze' and "Constant" in input_node.kind():
+            if node.kind() == 'onnx::Unsqueeze' and input_node.kind() == 'onnx::Constant':
+                print("Node with input coming from Constant node.")
             # The second condition in the statement below is needed because actual
             # inputs (not params) are also outputs of the prim::Param node.
             is_param = input_node.kind() == 'prim::Param' and val.uniqueName() in params_dict
             if is_param:
                 assert input_node is source_node # Always one and only one prim::Param source node in a PTIR graph.
 
-            is_constant = input_node.kind() == "prim::Constant" and \
+            is_constant = input_node.kind() == "onnx::Constant" and \
                 not input_node.mustBeNone() and \
                 (input_node.kindOf("value") == "t" or input_node.kindOf("value") == "is")
             if is_param:
@@ -256,7 +259,7 @@ def _optimize_graph_constant_folding(block, params_dict):
                 kind_of_leaf_node.append(LeafNodes.PRIM_PARAM)
             elif is_constant:
                 input_tensor_values.append(input_node["value"])
-                kind_of_leaf_node.append(LeafNodes.PRIM_PARAM)
+                kind_of_leaf_node.append(LeafNodes.ONNX_CONSTANT)
 
         if input_tensor_values and len(input_tensor_values) == len(input_vals):
             # Do folding for this node and delete the node
@@ -281,18 +284,16 @@ def _optimize_graph_constant_folding(block, params_dict):
                 assert len(input_tensor_values) == 1
                 attrs = {k: node[k] for k in node.attributeNames()}
                 if 'axes' not in attrs:
-                    raise RuntimeError('\'onnx::Unsqueeze\' node must have attribute \'axes\'.')
+                    raise RuntimeError("\'onnx::Unsqueeze\' node must have attribute \'axes\'.")
                 updated_val = input_tensor_values[0]
                 for dim in attrs['axes']:
                     updated_val = torch.unsqueeze(updated_val, dim)
             elif node.kind() == 'onnx::Transpose':
                 assert len(input_tensor_values) == 1
                 attrs = {k: node[k] for k in node.attributeNames()}
-                if 'axes' not in attrs:
-                    raise RuntimeError('\'onnx::Unsqueeze\' node must have attribute \'axes\'.')
-                updated_val = input_tensor_values[0]
-                for dim in attrs['axes']:
-                    updated_val = torch.unsqueeze(updated_val, dim)
+                if 'perm' not in attrs:
+                    raise RuntimeError("\'onnx::Transpose\' node must have attribute \'perm\'.")
+                updated_val = input_tensor_values[0].permute(attrs['perm'])
             else:
                 # Skip this node
                 continue
@@ -320,6 +321,9 @@ def _optimize_graph_constant_folding(block, params_dict):
                     idxs_matching_source_output.append(idx_matching_source_output[0])
 
             node.removeAllInputs()
+            # TODO: This for loop below needs to be done only for PRIM_PARAM case.
+            # Can this be brought before removeAllInputs() above and into the if PRIM_PARAM
+            # code block above? I think it can be.
             for node_idx_in_source_output in idxs_matching_source_output:
                 if len(list(source_node.outputsAt(node_idx_in_source_output).uses())) == 0:
                         # # Delete the particular output of the source prim::Param node
