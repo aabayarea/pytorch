@@ -377,6 +377,7 @@ void initPythonIRBindings(PyObject* module_) {
       .VS(setUniqueName)
       .VS(offset)
       .VS(uses)
+      .VS(hasUses)
       .VS(replaceAllUsesWith)
       .def("node", [](Value& v) { return v.node(); })
       .def(

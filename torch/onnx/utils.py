@@ -219,13 +219,60 @@ def _get_source_node(block):
     raise RuntimeError("Malformed IR graph - did not find any prim::Param node in the block.")
 
 
+def _run_torch_backend_for_onnx(node, input_tensor_values):    
+    if node.kind() == 'onnx::Slice':
+        assert len(input_tensor_values) == 1
+        attrs = {k: node[k] for k in node.attributeNames()}
+        if not ('axes' in attrs and 'starts' in attrs and 'ends' in attrs):
+            raise RuntimeError('\'onnx::Slice\' node must have attributes \'axes\', \
+                \'starts\', and \'ends\'.')
+        if (len(attrs['axes']) != len(attrs['starts'])) or \
+            (len(attrs['axes']) != len(attrs['ends'])):
+            raise RuntimeError('\'onnx::Slice\' node attributes \'axes\', \
+                \'starts\', and \'ends\' must have same length.')
+        updated_val = input_tensor_values[0]
+        for dim, start, end in zip(attrs['axes'], attrs['starts'], attrs['ends']):
+            updated_val = torch.narrow(updated_val, dim, start, end - start)
+
+    elif node.kind() == 'onnx::Concat':
+        attrs = {k: node[k] for k in node.attributeNames()}
+        updated_val = torch.cat(input_tensor_values, dim=attrs['axis'])
+
+    elif node.kind() == 'onnx::Unsqueeze':
+        assert len(input_tensor_values) == 1
+        attrs = {k: node[k] for k in node.attributeNames()}
+        if 'axes' not in attrs:
+            raise RuntimeError("\'onnx::Unsqueeze\' node must have attribute \'axes\'.")
+        updated_val = input_tensor_values[0]
+        for dim in attrs['axes']:
+            updated_val = torch.unsqueeze(updated_val, dim)
+
+    elif node.kind() == 'onnx::Transpose':
+        assert len(input_tensor_values) == 1
+        attrs = {k: node[k] for k in node.attributeNames()}
+        if 'perm' not in attrs:
+            raise RuntimeError("\'onnx::Transpose\' node must have attribute \'perm\'.")
+        updated_val = input_tensor_values[0].permute(attrs['perm'])
+
+    else:
+        updated_val = None
+    
+    return updated_val
+
+
+def _erase_unused_outputs(node):
+    for k in reversed(range(node.outputsSize())):
+        if not node.outputsAt(k).hasUses():
+            node.eraseOutput(k)
+
+
 def _optimize_graph_constant_folding(block, params_dict):
     # # This method updates the graph in-place to replace
     # # all the one-time constant-based computations into 
     # # a constant or initializer node.
     class LeafNodes:
         # Currently only prim::Param and prim::Constant are supported.
-        # More can be added as needed.
+        # More can be added if needed.
         PRIM_PARAM = 0
         ONNX_CONSTANT = 1
 
@@ -243,8 +290,8 @@ def _optimize_graph_constant_folding(block, params_dict):
             # print(val)
             input_node = val.node()
             # if node.kind() == 'onnx::Unsqueeze' and "Constant" in input_node.kind():
-            if node.kind() == 'onnx::Unsqueeze' and input_node.kind() == 'onnx::Constant':
-                print("Node with input coming from Constant node.")
+            # if node.kind() == 'onnx::Unsqueeze' and input_node.kind() == 'onnx::Constant':
+            #     print("Node with input coming from Constant node.")
             # The second condition in the statement below is needed because actual
             # inputs (not params) are also outputs of the prim::Param node.
             is_param = input_node.kind() == 'prim::Param' and val.uniqueName() in params_dict
@@ -264,40 +311,10 @@ def _optimize_graph_constant_folding(block, params_dict):
         if input_tensor_values and len(input_tensor_values) == len(input_vals):
             # Do folding for this node and delete the node
             # print(input_tensor_values)
-            if node.kind() == 'onnx::Slice':
-                assert len(input_tensor_values) == 1
-                attrs = {k: node[k] for k in node.attributeNames()}
-                if not ('axes' in attrs and 'starts' in attrs and 'ends' in attrs):
-                    raise RuntimeError('\'onnx::Slice\' node must have attributes \'axes\', \
-                        \'starts\', and \'ends\'.')
-                if (len(attrs['axes']) != len(attrs['starts'])) or \
-                    (len(attrs['axes']) != len(attrs['ends'])):
-                    raise RuntimeError('\'onnx::Slice\' node attributes \'axes\', \
-                        \'starts\', and \'ends\' must have same length.')
-                updated_val = input_tensor_values[0]
-                for dim, start, end in zip(attrs['axes'], attrs['starts'], attrs['ends']):
-                    updated_val = torch.narrow(updated_val, dim, start, end - start)
-            elif node.kind() == 'onnx::Concat':
-                attrs = {k: node[k] for k in node.attributeNames()}
-                updated_val = torch.cat(input_tensor_values, dim=attrs['axis'])
-            elif node.kind() == 'onnx::Unsqueeze':
-                assert len(input_tensor_values) == 1
-                attrs = {k: node[k] for k in node.attributeNames()}
-                if 'axes' not in attrs:
-                    raise RuntimeError("\'onnx::Unsqueeze\' node must have attribute \'axes\'.")
-                updated_val = input_tensor_values[0]
-                for dim in attrs['axes']:
-                    updated_val = torch.unsqueeze(updated_val, dim)
-            elif node.kind() == 'onnx::Transpose':
-                assert len(input_tensor_values) == 1
-                attrs = {k: node[k] for k in node.attributeNames()}
-                if 'perm' not in attrs:
-                    raise RuntimeError("\'onnx::Transpose\' node must have attribute \'perm\'.")
-                updated_val = input_tensor_values[0].permute(attrs['perm'])
-            else:
+            updated_val = _run_torch_backend_for_onnx(node, input_tensor_values)
+            if updated_val is None:
                 # Skip this node
-                continue
-
+                continue            
             new_source_node_output = source_node.addOutput()
             params_dict[new_source_node_output.uniqueName()] = updated_val # Assumes 'node' is single output
             # new_source_node_output.copyMetadata(node.outputsAt(0))
@@ -332,10 +349,12 @@ def _optimize_graph_constant_folding(block, params_dict):
                         # Delete the corresponding entry in params_dict
                         del params_dict[source_output_names[node_idx_in_source_output]]
 
-    for k in reversed(range(source_node.outputsSize())):
-        if len(list(source_node.outputsAt(k).uses())) == 0:
-            # print(source_node.outputsAt(k).uniqueName())
-            source_node.eraseOutput(k)
+    _erase_unused_outputs(source_node)
+    # for k in reversed(range(source_node.outputsSize())):
+    #     # if len(list(source_node.outputsAt(k).uses())) == 0:
+    #     if not source_node.outputsAt(k).hasUses():
+    #         # print(source_node.outputsAt(k).uniqueName())
+    #         source_node.eraseOutput(k)
 
     # source_node_outputs = list(source_node.outputs())
     # output_idxs_to_remove = [j for j in range(len(source_node_outputs)) \
