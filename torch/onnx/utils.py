@@ -215,8 +215,7 @@ def _get_source_node(block):
         for val in node.inputs():
             if val.node().kind() == 'prim::Param':
                 return val.node()
-
-    raise RuntimeError("Malformed IR graph - did not find any prim::Param node in the block.")
+    return None
 
 
 def _run_torch_backend_for_onnx(node, input_tensor_values):    
@@ -280,7 +279,14 @@ def _optimize_graph_constant_folding(block, params_dict):
     for node in block.nodes():
         for nested_block in node.blocks():
             _optimize_graph_constant_folding(nested_block, params_dict)
-
+        # Some inner blocks (onnx::If) may not have prim::Param, in which
+        # case source_node will be None. When that happens, we first recurse
+        # into the sub-blocks (line right above) of all the nodes in this 
+        # block, and then skip (line below) over all the nodes of this block
+        # itself, because since it does not have prim::Param, there's nothing
+        # to do.
+        if source_node is None:
+            continue
         input_vals = list(node.inputs())
         # Check if a node is a leaf node or not, and if it is, 
         # then get tensor values for all the inputs.
@@ -336,7 +342,8 @@ def _optimize_graph_constant_folding(block, params_dict):
                 if not source_node.outputsAt(node_idx_in_source_output).hasUses():
                          del params_dict[source_output_names[node_idx_in_source_output]]
     # Remove all initializers that were folded from the source node.
-    _erase_unused_node_outputs(source_node)
+    if source_node is not None:
+        _erase_unused_node_outputs(source_node)
     print('Constant Folding Done!')
 
 
