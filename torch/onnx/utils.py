@@ -277,8 +277,12 @@ def _optimize_graph_constant_folding(block, params_dict):
 
     source_node = _get_source_node(block)
     for node in block.nodes():
-        for nested_block in node.blocks():
-            _optimize_graph_constant_folding(nested_block, params_dict)
+        # Only the root block in the graph is constant-folded. 
+        # Nested blocks are not supported for now.
+
+        # for nested_block in node.blocks():
+        #     _optimize_graph_constant_folding(nested_block, params_dict)
+
         # Some inner blocks (onnx::If) may not have prim::Param, in which
         # case source_node will be None. When that happens, we first recurse
         # into the sub-blocks (line right above) of all the nodes in this 
