@@ -276,21 +276,12 @@ def _optimize_graph_constant_folding(block, params_dict):
         ONNX_CONSTANT = 1
 
     source_node = _get_source_node(block)
+    if source_node is None:
+        return
     for node in block.nodes():
         # Only the root block in the graph is constant-folded. 
         # Nested blocks are not supported for now.
 
-        # for nested_block in node.blocks():
-        #     _optimize_graph_constant_folding(nested_block, params_dict)
-
-        # Some inner blocks (onnx::If) may not have prim::Param, in which
-        # case source_node will be None. When that happens, we first recurse
-        # into the sub-blocks (line right above) of all the nodes in this 
-        # block, and then skip (line below) over all the nodes of this block
-        # itself, because since it does not have prim::Param, there's nothing
-        # to do.
-        if source_node is None:
-            continue
         input_vals = list(node.inputs())
         # Check if a node is a leaf node or not, and if it is, 
         # then get tensor values for all the inputs.
@@ -422,7 +413,7 @@ def export_to_pretty_string(model, args, f, export_params=True, verbose=False, t
 def _export_to_pretty_string(model, args, f, export_params=True, verbose=False, training=False,
                              input_names=None, output_names=None, operator_export_type=OperatorExportTypes.ONNX,
                              export_type=ExportTypes.PROTOBUF_FILE, example_outputs=None, propagate=False,
-                             google_printer=False, opset_version=None, do_constant_folding=True):
+                             google_printer=False, opset_version=None, do_constant_folding=False):
     from torch.onnx.symbolic import _default_onnx_opset_version, _set_opset_version
     if opset_version is None:
         opset_version = _default_onnx_opset_version

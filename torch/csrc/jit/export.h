@@ -32,6 +32,9 @@ TORCH_API std::string pretty_print_onnx(
     const std::shared_ptr<Graph>& graph,
     const std::map<std::string, at::Tensor>& initializers,
     int64_t onnx_opset_version,
+    bool defer_weight_export,
+    ::torch::onnx::OperatorExportTypes operator_export_type =
+        ::torch::onnx::OperatorExportTypes::ONNX,
     bool google_printer = false);
 
 TORCH_API void ExportModule(
