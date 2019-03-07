@@ -221,7 +221,7 @@ void initPythonIRBindings(PyObject* module_) {
       .def(
           "_export_onnx",
           [](const std::shared_ptr<Graph> g,
-             const std::vector<at::Tensor>& initializers,
+             const std::map<std::string, at::Tensor>& initializers,
              int64_t onnx_opset_version,
              bool defer_weight_export,
              ::torch::onnx::OperatorExportTypes operator_export_type) {
@@ -255,7 +255,7 @@ void initPythonIRBindings(PyObject* module_) {
       .def(
           "_pretty_print_onnx",
           [](const std::shared_ptr<Graph> g,
-             const std::vector<at::Tensor>& initializers,
+             const std::map<std::string, at::Tensor>& initializers,
              int64_t onnx_opset_version,
              bool defer_weight_export,
              ::torch::onnx::OperatorExportTypes operator_export_type,
@@ -309,6 +309,7 @@ void initPythonIRBindings(PyObject* module_) {
           py::arg("recurse") = true)
       .def("addInput", [](Graph& g) { return g.addInput(); })
       .def("copy", [](Graph& g) { return g.copy(); })
+      .def("block", [](Graph& g) { return g.block(); })
       .GS(eraseInput)
       .GS(registerOutput)
       .def(
@@ -375,6 +376,7 @@ void initPythonIRBindings(PyObject* module_) {
       .VS(setUniqueName)
       .VS(offset)
       .VS(uses)
+      .VS(hasUses)
       .VS(replaceAllUsesWith)
       .def("node", [](Value& v) { return v.node(); })
       .def(
