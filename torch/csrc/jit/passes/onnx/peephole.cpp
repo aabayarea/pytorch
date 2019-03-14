@@ -637,5 +637,62 @@ void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph) {
   removeMaxPoolUnusedOutput(graph->block());
 }
 
+static const Node* getSourceNode(const Block& b) {
+  for (auto it = b.nodes().begin(), end = b.nodes().end(); it != end; ++it) {
+    auto n = *it;
+    for (auto input : n->inputs()) {
+      if(input->node()->kind() == prim::Param) {
+        return input->node();
+      }
+    }
+  }
+  return nullptr;
+}
+
+enum ConstantLeafNodeKind {
+  PRIM_PARAM,
+  ONNX_CONSTANT
+};
+
+void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramDict) {
+  printf(" I am in Constant Fold.\n");
+  
+  auto sourceNode = getSourceNode(*b);
+  if (sourceNode == nullptr) {
+    // auto qe = sourceNode->kind().toQualString();
+    // printf(qe);
+    return;
+  }
+  for (auto it = b->nodes().begin(), end = b->nodes().end(); it != end; ++it) {
+    auto node = *it;
+    size_t numInputs = node->inputs().size();
+    std::Stack<at::Tensor> inputTensorValues;
+    inputTensorValues.reserve(numInputs);
+    std::vector<ConstantLeafNodeKind> kindOfLeafNode;
+    kindOfLeafNode.reserve(numInputs);
+    for (auto val : node->inputs()) {
+      auto inputNode = val->node();
+      bool isParam = inputNode->kind() == prim::Param && paramDict.count(val->uniqueName());
+      if (isParam) {
+        AT_ASSERT(sourceNode == inputNode); // One and only one prim::Param node in block.
+      }
+      bool isConstant = inputNode->kind() == onnx::Constant && !inputNode->mustBeNone()
+        && (toString(inputNode->kindOfS("value")) == std::string("t") 
+        || toString(inputNode->kindOfS("value")) == std::string("is")); // TODO: Check other types?
+      if (isParam) {
+        inputTensorValues.push_back(paramDict[val->uniqueName()]);
+        kindOfLeafNode.push_back(ConstantLeafNodeKind::PRIM_PARAM);
+      }
+      else if (isConstant) {
+        inputTensorValues.push_back(inputNode->t(c10::Symbol::fromQualString("attr::value")));
+        kindOfLeafNode.push_back(ConstantLeafNodeKind::ONNX_CONSTANT);
+      }
+
+
+
+    }
+  }
+}
+
 } // namespace jit
 } // namespace torch

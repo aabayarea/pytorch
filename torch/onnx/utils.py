@@ -240,6 +240,8 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
     params_dict = dict(zip(param_names, params))
 
     graph = _optimize_graph(graph, operator_export_type)
+    
+    torch._C._jit_pass_onnx_constant_fold(graph, params_dict)
 
     # NB: ONNX requires complete information about output types, which might be
     # erased by some optimizations, so we need to set it explicitly again.

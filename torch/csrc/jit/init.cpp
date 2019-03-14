@@ -102,6 +102,12 @@ void initJITBindings(PyObject* module) {
       .def("_jit_pass_onnx", ToONNX)
       .def("_jit_pass_lower_all_tuples", LowerAllTuples)
       .def("_jit_pass_onnx_peephole", PeepholeOptimizeONNX)
+      .def(
+           "_jit_pass_onnx_constant_fold",
+           [](std::shared_ptr<Graph>& graph,
+               std::map<std::string, at::Tensor>& paramsDict) {
+           return ConstantFoldONNX(graph->block(), paramsDict); // overload resolution
+          })
       .def("_jit_pass_fuse", FuseGraph)
       .def(
           "_jit_pass_dce",
