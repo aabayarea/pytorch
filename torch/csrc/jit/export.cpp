@@ -233,6 +233,9 @@ void EncoderBase::EncodeBlock(
   num_blocks_++;
   graph_proto->set_name(block_name);
 
+  size_t numInputs0 = block->inputs().size();
+  auto numInitializers0 = initializers.size();
+
   for (auto input : block->inputs()) {
     onnx::ValueInfoProto* v = graph_proto->add_input();
     EncodeValueInfo(graph_proto, v, input);
@@ -311,7 +314,8 @@ void EncoderBase::EncodeBlock(
       EncodeBlock(false_g, node->blocks()[1]);
     }
   }
-
+  size_t numInputs = block->inputs().size();
+  auto numInitializers = initializers.size();
   AT_ASSERT(block->inputs().size() >= initializers.size());
   for (auto& name_tensor_pair : initializers) {
     auto p = graph_proto->add_initializer();

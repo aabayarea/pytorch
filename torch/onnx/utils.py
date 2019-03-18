@@ -237,6 +237,8 @@ def _run_torch_backend_for_onnx(node, input_tensor_values):
 
     elif node.kind() == 'onnx::Concat':
         attrs = {k: node[k] for k in node.attributeNames()}
+        # import pdb
+        # pdb.set_trace()
         updated_val = torch.cat(input_tensor_values, dim=attrs['axis'])
 
     elif node.kind() == 'onnx::Unsqueeze':
@@ -262,9 +264,12 @@ def _run_torch_backend_for_onnx(node, input_tensor_values):
 
 
 def _erase_unused_node_outputs(node):
+    removed_output_names = []
     for k in reversed(range(node.outputsSize())):
         if not node.outputsAt(k).hasUses():
+            removed_output_names.append(node.outputsAt(k).uniqueName())
             node.eraseOutput(k)
+    return removed_output_names
 
 
 def _optimize_graph_constant_folding(block, params_dict):
@@ -287,9 +292,15 @@ def _optimize_graph_constant_folding(block, params_dict):
         input_vals = list(node.inputs())
         # Check if a node is a leaf node or not, and if it is, 
         # then get tensor values for all the inputs.
+
+        # if node.kind() == "onnx::Slice": # and [v.uniqueName() for v in input_vals] is ['8']:
+        #     print([v.uniqueName() for v in input_vals])
+        #     print('I am here.\n')
         input_tensor_values = []
-        kind_of_leaf_node = []
+        kind_of_leaf_node = []        
         for val in input_vals:
+            if val.uniqueName() == '232':
+                print('I am here.\n')
             input_node = val.node()
             is_param = input_node.kind() == 'prim::Param' and val.uniqueName() in params_dict
             if is_param:
@@ -307,6 +318,8 @@ def _optimize_graph_constant_folding(block, params_dict):
         # If there are inputs, and if they all can be folded, then fold them.
         if input_tensor_values and len(input_tensor_values) == len(input_vals):
             updated_val = _run_torch_backend_for_onnx(node, input_tensor_values)
+            # if node.kind() == "onnx::Concat" and len(updated_val.size()) == 2:
+            #     print('I am here.\n')
             if updated_val is None:
                 # Constant folding not supported for this op. Skip it.
                 continue
@@ -317,6 +330,8 @@ def _optimize_graph_constant_folding(block, params_dict):
             # tensor and replace the output of the folded node with the 
             # initializer as input for all downstream nodes.         
             new_source_node_output = source_node.addOutput()
+            if new_source_node_output.uniqueName() == '232':
+                print('I am here.\n')
             params_dict[new_source_node_output.uniqueName()] = updated_val
             new_source_node_output.inferTypeFrom(updated_val)            
             node.outputsAt(0).replaceAllUsesWith(new_source_node_output)
@@ -340,7 +355,11 @@ def _optimize_graph_constant_folding(block, params_dict):
                          del params_dict[source_output_names[node_idx_in_source_output]]
     # Remove all initializers that were folded from the source node.
     if source_node is not None:
-        _erase_unused_node_outputs(source_node)
+        removed_source_output_names = _erase_unused_node_outputs(source_node)
+    for source_output_name in removed_source_output_names:
+        if source_output_name in params_dict.keys():
+            del params_dict[source_output_name]
+
 
 
 def _model_to_graph(model, args, f, verbose=False, training=False,
@@ -367,7 +386,7 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
             raise RuntimeError('\'forward\' method must be a script method')
     else:
         graph, torch_out = _trace_and_get_graph_from_model(model, args, training)
-        params = list(_unique_state_dict(model).values())
+        params = list(_unique_state_dict(model, keep_vars=True).values())
     
     input_and_param_names = [val.uniqueName() for val in graph.inputs()]
     param_names = input_and_param_names[len(input_and_param_names) - len(params):]
@@ -386,6 +405,8 @@ def _model_to_graph(model, args, f, verbose=False, training=False,
 
     if do_constant_folding:
         # Works on ONNX graphs, therefore must come after _optimize_graph() call.
+        # import pdb
+        # pdb.set_trace()
         _optimize_graph_constant_folding(graph.block(), params_dict)
 
     if verbose:

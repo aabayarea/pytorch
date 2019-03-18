@@ -409,7 +409,16 @@ def cumsum(g, input, dim):
 
 
 def t(g, self):
-    return g.op("Transpose", self, perm_i=(1, 0))
+    # return g.op("Transpose", self, perm_i=(1, 0))
+    dataType = self.type().scalarType()
+    if dataType != 'Float':
+        tensor = g.op("Cast", self, to_i=cast_pytorch_to_onnx['Float'])
+    else:
+        tensor = self
+    tensor = g.op("Transpose", tensor, perm_i=(1, 0))
+    if dataType != 'Float':
+        tensor = g.op("Cast", tensor, to_i=cast_pytorch_to_onnx[dataType])
+    return tensor
 
 
 def expand(g, self, size, implicit):
@@ -1280,27 +1289,27 @@ scalar_type_to_onnx = [
 def zeros(g, sizes, dtype, layout, device):
     # NOTE: no way to set device and layout in ONNX, so we ignore it
     return g.op("ConstantOfShape", sizes,
-                value_t=torch.tensor(0, dtype=scalar_type_to_pytorch_type[dtype]))
+                value_t=torch.tensor([0], dtype=scalar_type_to_pytorch_type[dtype]))
 
 
 @parse_args('v', 'i', 'v', 'v')
 def zeros_like(g, input, dtype, layout, device):
     shape = g.op("Shape", input)
     return g.op("ConstantOfShape", shape,
-                value_t=torch.tensor(0, dtype=scalar_type_to_pytorch_type[dtype]))
+                value_t=torch.tensor([0], dtype=scalar_type_to_pytorch_type[dtype]))
 
 
 @parse_args('v', 'i', 'v', 'v')
 def ones(g, sizes, dtype, layout, device):
     return g.op("ConstantOfShape", sizes,
-                value_t=torch.tensor(1, dtype=scalar_type_to_pytorch_type[dtype]))
+                value_t=torch.tensor([1], dtype=scalar_type_to_pytorch_type[dtype]))
 
 
 @parse_args('v', 'i', 'v', 'v')
 def ones_like(g, input, dtype, layout, device):
     shape = g.op("Shape", input)
     return g.op("ConstantOfShape", shape,
-                value_t=torch.tensor(1, dtype=scalar_type_to_pytorch_type[dtype]))
+                value_t=torch.tensor([1], dtype=scalar_type_to_pytorch_type[dtype]))
 
 
 def full(g, sizes, value, dtype, layout, device):
