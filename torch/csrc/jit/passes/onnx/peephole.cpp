@@ -2,6 +2,7 @@
 #include <torch/csrc/jit/passes/onnx/peephole.h>
 
 #include <c10/util/Optional.h>
+#include <ATen/ATen.h>
 
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
@@ -637,7 +638,7 @@ void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph) {
   removeMaxPoolUnusedOutput(graph->block());
 }
 
-static const Node* getSourceNode(const Block& b) {
+static Node* getSourceNode(const Block& b) {
   for (auto it = b.nodes().begin(), end = b.nodes().end(); it != end; ++it) {
     auto n = *it;
     for (auto input : n->inputs()) {
@@ -649,12 +650,42 @@ static const Node* getSourceNode(const Block& b) {
   return nullptr;
 }
 
+static at::Tensor runTorchBackendForOnnx(const Node* node, const std::vector<at::Tensor>& inputTensorValues) {
+  at::Tensor updated_val;
+  auto nodeKind = node->kind().toDisplayString();
+  printf("Backend compute nodeKind is %s.\n", nodeKind);
+  // if (node->kind() == onnx::Slice) {
+  //   if ( !(node->hasAttributeS("axes") && node->hasAttributeS("starts") && node->hasAttributeS("ends")) ) {
+  //     throw std::runtime_error("Missing attribute(s) in onnx::Slice op.");
+  //   }
+  //   auto axesAttr = node->is(attr::axes);
+  //   auto startsAttr = node->is(attr::starts);
+  //   auto endsAttr = node->is(attr::ends);
+  //   if (axesAttr.size() != startsAttr.size() || axesAttr.size() != endsAttr.size()) {
+  //     throw std::runtime_error("onnx::Slice node attributues named, axes, starts, and ends, must be the same length.");
+  //   }
+  //   updated_val = inputTensorValues[0];
+  //   for (size_t i = 0; i < axesAttr.size(); ++i) {
+  //     updated_val = at::narrow(updated_val, axesAttr[i], startsAttr[i], endsAttr[i] - startsAttr[i]);
+  //   }
+  // }
+  if (node->kind() == onnx::Concat) {
+    updated_val = at::cat(at::TensorList(inputTensorValues), node->i(attr::axis));
+  }
+  else {
+    updated_val = at::empty({0});
+    auto qe = updated_val.size(0);
+    printf("Op not found. Size of updated_val is %d.\n", int(qe));
+  }
+  return updated_val;
+}
+
 enum ConstantLeafNodeKind {
   PRIM_PARAM,
   ONNX_CONSTANT
 };
 
-void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramDict) {
+void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramsDict) {
   printf(" I am in Constant Fold.\n");
   
   auto sourceNode = getSourceNode(*b);
@@ -665,14 +696,16 @@ void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramDict) {
   }
   for (auto it = b->nodes().begin(), end = b->nodes().end(); it != end; ++it) {
     auto node = *it;
+    auto nodeKind = node->kind().toDisplayString();
+    printf("Main nodeKind is %s.\n", nodeKind);
     size_t numInputs = node->inputs().size();
-    std::Stack<at::Tensor> inputTensorValues;
+    std::vector<at::Tensor> inputTensorValues;
     inputTensorValues.reserve(numInputs);
     std::vector<ConstantLeafNodeKind> kindOfLeafNode;
     kindOfLeafNode.reserve(numInputs);
     for (auto val : node->inputs()) {
       auto inputNode = val->node();
-      bool isParam = inputNode->kind() == prim::Param && paramDict.count(val->uniqueName());
+      bool isParam = inputNode->kind() == prim::Param && paramsDict.count(val->uniqueName());
       if (isParam) {
         AT_ASSERT(sourceNode == inputNode); // One and only one prim::Param node in block.
       }
@@ -680,15 +713,41 @@ void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramDict) {
         && (toString(inputNode->kindOfS("value")) == std::string("t") 
         || toString(inputNode->kindOfS("value")) == std::string("is")); // TODO: Check other types?
       if (isParam) {
-        inputTensorValues.push_back(paramDict[val->uniqueName()]);
+        printf("Before size of inputTensorValues is %d.\n", int(inputTensorValues.size()));
+        // TODO: Shall we do std::move when pushing into vector below. 
+        // Probably not, because that will leave the paramsDict container element in a
+        // bad state (because if we move element out of container, we should remove the
+        // element explicitly). And we are returning the container paramsDict back for 
+        // serialization, so we need it to be in a good state. We delete all unused 
+        // names in paramsDict at the end at once.  
+        inputTensorValues.push_back(paramsDict[val->uniqueName()]);
+        printf("After size of inputTensorValues is %d.\n", int(inputTensorValues.size()));
+
         kindOfLeafNode.push_back(ConstantLeafNodeKind::PRIM_PARAM);
       }
       else if (isConstant) {
         inputTensorValues.push_back(inputNode->t(c10::Symbol::fromQualString("attr::value")));
         kindOfLeafNode.push_back(ConstantLeafNodeKind::ONNX_CONSTANT);
       }
+    }
+    printf("Final size of inputTensorValues is %d.\n", int(inputTensorValues.size()));
+    printf("Final value of numInputs is %d.\n", int(numInputs));
+    if (!inputTensorValues.empty() && inputTensorValues.size() == numInputs) {
+      auto updated_val = runTorchBackendForOnnx(node, inputTensorValues);
+      if (updated_val.size(0) == 0) {
+        // Constant folding not supported for this op. Skip it.
+        continue;
+      }
+      if (node->outputs().size() > 1) {
+        // Constant folding for multiple-output nodes not supported. Skip it.
+        continue;
+      }
+      auto newSourceNodeOutput = sourceNode->addOutput();
+      paramsDict[newSourceNodeOutput->uniqueName()] = updated_val;
+      newSourceNodeOutput->inferTypeFrom(updated_val);
+      node->outputs().at(0)->replaceAllUsesWith(newSourceNodeOutput);
 
-
+      
 
     }
   }
