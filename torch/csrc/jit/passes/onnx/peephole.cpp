@@ -638,7 +638,7 @@ void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph) {
   removeMaxPoolUnusedOutput(graph->block());
 }
 
-static Node* getSourceNode(const Block& b) {
+static Node* getSourceNode(Block& b) {
   for (auto it = b.nodes().begin(), end = b.nodes().end(); it != end; ++it) {
     auto n = *it;
     for (auto input : n->inputs()) {
@@ -650,25 +650,37 @@ static Node* getSourceNode(const Block& b) {
   return nullptr;
 }
 
+std::vector<std::string> eraseUnusedNodeOutputs(Node* node) {
+  std::vector<std::string> removedOutputNames;
+  for (size_t i_1 = node->outputs().size(); i_1 > 0; --i_1) {
+      size_t i = i_1 - 1;
+      if (!node->outputs().at(i)->hasUses()) {
+        removedOutputNames.push_back(node->outputs().at(i)->uniqueName());
+        node->eraseOutput(i);
+      }
+  }
+  return removedOutputNames;
+}
+
 static at::Tensor runTorchBackendForOnnx(const Node* node, const std::vector<at::Tensor>& inputTensorValues) {
   at::Tensor updated_val;
   auto nodeKind = node->kind().toDisplayString();
   printf("Backend compute nodeKind is %s.\n", nodeKind);
-  // if (node->kind() == onnx::Slice) {
-  //   if ( !(node->hasAttributeS("axes") && node->hasAttributeS("starts") && node->hasAttributeS("ends")) ) {
-  //     throw std::runtime_error("Missing attribute(s) in onnx::Slice op.");
-  //   }
-  //   auto axesAttr = node->is(attr::axes);
-  //   auto startsAttr = node->is(attr::starts);
-  //   auto endsAttr = node->is(attr::ends);
-  //   if (axesAttr.size() != startsAttr.size() || axesAttr.size() != endsAttr.size()) {
-  //     throw std::runtime_error("onnx::Slice node attributues named, axes, starts, and ends, must be the same length.");
-  //   }
-  //   updated_val = inputTensorValues[0];
-  //   for (size_t i = 0; i < axesAttr.size(); ++i) {
-  //     updated_val = at::narrow(updated_val, axesAttr[i], startsAttr[i], endsAttr[i] - startsAttr[i]);
-  //   }
-  // }
+  if (node->kind() == onnx::Slice) {
+    if ( !(node->hasAttributeS("axes") && node->hasAttributeS("starts") && node->hasAttributeS("ends")) ) {
+      throw std::runtime_error("Missing attribute(s) in onnx::Slice op.");
+    }
+    auto axesAttr = node->is(attr::axes);
+    auto startsAttr = node->is(attr::starts);
+    auto endsAttr = node->is(attr::ends);
+    if (axesAttr.size() != startsAttr.size() || axesAttr.size() != endsAttr.size()) {
+      throw std::runtime_error("onnx::Slice node attributues named, axes, starts, and ends, must be the same length.");
+    }
+    updated_val = inputTensorValues[0];
+    for (size_t i = 0; i < axesAttr.size(); ++i) {
+      updated_val = at::narrow(updated_val, axesAttr[i], startsAttr[i], endsAttr[i] - startsAttr[i]);
+    }
+  }
   if (node->kind() == onnx::Concat) {
     updated_val = at::cat(at::TensorList(inputTensorValues), node->i(attr::axis));
   }
@@ -747,10 +759,44 @@ void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramsDict) {
       newSourceNodeOutput->inferTypeFrom(updated_val);
       node->outputs().at(0)->replaceAllUsesWith(newSourceNodeOutput);
 
-      
+      std::unordered_map<std::string, size_t> sourceOutputNames;
+      // sourceOutputNames.reserve(sourceNode->outputs().size());
+            // for (const auto& output : sourceNode->outputs()) {
+      //   sourceOutputNames.push_back(output->uniqueName());
+      // }
+      std::map<size_t, std::string> sourceOutputsToRemove;
+      for (size_t i = 0; i < sourceNode->outputs().size(); ++i) {
+        sourceOutputNames[sourceNode->outputs().at(i)->uniqueName()] = i;
+      }
 
+      for (size_t i = 0; i < numInputs; ++i) { 
+        if (kindOfLeafNode[i] == ConstantLeafNodeKind::PRIM_PARAM) {
+          auto matchIter = sourceOutputNames.find(node->inputs().at(i)->uniqueName());
+          if (matchIter != sourceOutputNames.end()) {
+            sourceOutputsToRemove[matchIter->second] = matchIter->first;
+          }
+        }
+      }
+
+      node->removeAllInputs();
+      for (const auto& elem : sourceOutputsToRemove) {
+        if (!sourceNode->outputs().at(elem.first)->hasUses()) {
+          paramsDict.erase(elem.second);
+        }
+      }
+      // // TODO: Should we delete the node, as in the line below?
+      // it.destroyCurrent();
     }
   }
+  if (sourceNode != nullptr) {
+    auto removedSourceOutputNames = eraseUnusedNodeOutputs(sourceNode);
+    for (const auto& removedName : removedSourceOutputNames) {
+      if (paramsDict.find(removedName) != paramsDict.end()) {
+        paramsDict.erase(removedName);
+      }
+    }
+  }
+
 }
 
 } // namespace jit
