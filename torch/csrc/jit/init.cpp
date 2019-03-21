@@ -106,8 +106,14 @@ void initJITBindings(PyObject* module) {
            "_jit_pass_onnx_constant_fold",
            [](std::shared_ptr<Graph>& graph,
                std::map<std::string, at::Tensor>& paramsDict) {
-           return ConstantFoldONNX(graph->block(), paramsDict); // overload resolution
-          })
+           ConstantFoldONNX(graph->block(), paramsDict); // overload resolution
+           printf("Length of paramsDict is %d.\n", int(paramsDict.size()));
+           // 'graph' was created on the C++ side so any changes in it are reflected
+           // on the Python side. paramsDict was created on the Python side and 
+           // is copied in C++ runtime. Therefore we need to return it explicitly
+           // with the right return_value_policy.
+           return paramsDict;
+          }, pybind11::return_value_policy::move)
       .def("_jit_pass_fuse", FuseGraph)
       .def(
           "_jit_pass_dce",

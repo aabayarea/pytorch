@@ -662,11 +662,13 @@ std::vector<std::string> eraseUnusedNodeOutputs(Node* node) {
   return removedOutputNames;
 }
 
-static at::Tensor runTorchBackendForOnnx(const Node* node, const std::vector<at::Tensor>& inputTensorValues) {
+static at::Tensor runTorchBackendForOnnx(const Node* node, std::vector<at::Tensor>& inputTensorValues) {
   at::Tensor updated_val;
   auto nodeKind = node->kind().toDisplayString();
   printf("Backend compute nodeKind is %s.\n", nodeKind);
+
   if (node->kind() == onnx::Slice) {
+    assert(inputTensorValues.size() == 1);
     if ( !(node->hasAttributeS("axes") && node->hasAttributeS("starts") && node->hasAttributeS("ends")) ) {
       throw std::runtime_error("Missing attribute(s) in onnx::Slice op.");
     }
@@ -680,9 +682,28 @@ static at::Tensor runTorchBackendForOnnx(const Node* node, const std::vector<at:
     for (size_t i = 0; i < axesAttr.size(); ++i) {
       updated_val = at::narrow(updated_val, axesAttr[i], startsAttr[i], endsAttr[i] - startsAttr[i]);
     }
-  }
-  if (node->kind() == onnx::Concat) {
+  }  
+  else if (node->kind() == onnx::Concat) {
     updated_val = at::cat(at::TensorList(inputTensorValues), node->i(attr::axis));
+  }
+  else if (node->kind() == onnx::Unsqueeze) {
+    assert(inputTensorValues.size() == 1);
+    if (!node->hasAttributeS("axes")) {
+      throw std::runtime_error("Missing attribute 'axes' in onnx::Unsqueeze op.");
+    }
+    updated_val = inputTensorValues[0];
+    for (auto axis: node->is(attr::axes)) {
+      updated_val = at::unsqueeze(updated_val, axis);
+    }
+  }
+  else if (node->kind() == onnx::Transpose) {
+    assert(inputTensorValues.size() == 1);
+    if (!node->hasAttributeS("perm")) {
+      throw std::runtime_error("Missing attribute 'perm' in onnx::Transpose op.");
+    }
+    // updated_val = inputTensorValues[0];
+    // updated_val.permute(node->is(attr::perm));
+    updated_val = inputTensorValues[0].permute(node->is(attr::perm));
   }
   else {
     updated_val = at::empty({0});
@@ -699,7 +720,7 @@ enum ConstantLeafNodeKind {
 
 void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramsDict) {
   printf(" I am in Constant Fold.\n");
-  
+  // paramsDict.erase(paramsDict.begin());
   auto sourceNode = getSourceNode(*b);
   if (sourceNode == nullptr) {
     // auto qe = sourceNode->kind().toQualString();
@@ -754,16 +775,14 @@ void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramsDict) {
         // Constant folding for multiple-output nodes not supported. Skip it.
         continue;
       }
+
+      // TODO: Bring comments from Python version here.
       auto newSourceNodeOutput = sourceNode->addOutput();
       paramsDict[newSourceNodeOutput->uniqueName()] = updated_val;
       newSourceNodeOutput->inferTypeFrom(updated_val);
       node->outputs().at(0)->replaceAllUsesWith(newSourceNodeOutput);
 
       std::unordered_map<std::string, size_t> sourceOutputNames;
-      // sourceOutputNames.reserve(sourceNode->outputs().size());
-            // for (const auto& output : sourceNode->outputs()) {
-      //   sourceOutputNames.push_back(output->uniqueName());
-      // }
       std::map<size_t, std::string> sourceOutputsToRemove;
       for (size_t i = 0; i < sourceNode->outputs().size(); ++i) {
         sourceOutputNames[sourceNode->outputs().at(i)->uniqueName()] = i;
@@ -796,7 +815,7 @@ void ConstantFoldONNX(Block* b, std::map<std::string, at::Tensor>& paramsDict) {
       }
     }
   }
-
+return;
 }
 
 } // namespace jit
