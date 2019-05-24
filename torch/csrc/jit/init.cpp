@@ -106,7 +106,11 @@ void initJITBindings(PyObject* module) {
           torch::jit::fuser::debugNumCachedKernelSpecs)
       .def("_jit_pass_onnx", ToONNX)
       .def("_jit_pass_lower_all_tuples", LowerAllTuples)
-      .def("_jit_pass_onnx_peephole", PeepholeOptimizeONNX)
+      .def("_jit_pass_onnx_peephole",
+          [](std::shared_ptr<Graph>& graph,
+             int batchSize) {
+            return PeepholeOptimizeONNX(graph, batchSize);
+            })
       .def(
           "_jit_pass_onnx_constant_fold",
           [](std::shared_ptr<Graph>& graph,

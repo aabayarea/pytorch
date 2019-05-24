@@ -420,6 +420,11 @@ void fixDefaultRNNState(Graph* graph, Node* n, int input_index) {
   concated_dims->addInput(unsqueezed_batch_size->outputs()[0]);
   concated_dims->addInput(hidden_size->outputs()[0]);
 
+  // if (initial_state->node()->kind() == onnx::Constant &&
+  //     !initial_state->node() &&
+  //     initial_state->node()->kindOf(attr::value) == AttributeKind::t) {
+  //       auto val_tensor = initial_state->node()->t(attr::value);
+  //     }
   Node* constant_of_shape = graph->create(onnx::ConstantOfShape, 1);
   constant_of_shape->insertBefore(n);
   constant_of_shape->addInput(concated_dims->outputs()[0]);
@@ -625,15 +630,20 @@ void removeMaxPoolUnusedOutput(Block* b) {
 // writing your optimization in jit/passes/peephole.cpp rather than
 // here, as it will be generally applicable to the JIT as well.  The
 // optimizations here are ONLY applied on ONNX update
-void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph) {
+void PeepholeOptimizeONNX(std::shared_ptr<Graph>& graph, int batchSize) {
   // TODO: decide on fixpoint strategy
   // TODO: make it easier not to do O(k) iterations over the graph, where
   // k is the number of distinct peephole optimizations
   hackFixupPadPackedShapes(graph->block());
   pushPackingPastRnn(graph->block());
   removeNopPacking(graph->block());
-  fixDefaultRnnHiddenState(graph->block());
-  fixDefaultLstmCellState(graph->block());
+  if (batchSize <= 0) {
+    // Update to RNN graph, needed only when
+    // we want the exported model to support
+    // variable batch size, otherwise not.
+    fixDefaultRnnHiddenState(graph->block());
+    fixDefaultLstmCellState(graph->block());
+  }
   fuseBroadcast(graph->block());
   fuseConsecutiveTransposes(graph->block());
   eliminateNopTranspose(graph->block());

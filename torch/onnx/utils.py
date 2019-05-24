@@ -55,8 +55,8 @@ def set_training(model, mode):
 
 def export(model, args, f, export_params=True, verbose=False, training=False,
            input_names=None, output_names=None, aten=False, export_raw_ir=False,
-           operator_export_type=None, opset_version=None, _retain_param_name=True,
-           do_constant_folding=False, example_outputs=None, strip_doc_string=True):
+           do_constant_folding=False, example_outputs=None, strip_doc_string=True,
+           batch_size=None):
     r"""
     Export a model into ONNX format.  This exporter runs your model
     once in order to get a trace of its execution to be exported;
@@ -130,7 +130,8 @@ def export(model, args, f, export_params=True, verbose=False, training=False,
     _export(model, args, f, export_params, verbose, training, input_names, output_names,
             operator_export_type=operator_export_type, opset_version=opset_version,
             _retain_param_name=_retain_param_name, do_constant_folding=do_constant_folding,
-            example_outputs=example_outputs, strip_doc_string=strip_doc_string)
+            example_outputs=example_outputs, strip_doc_string=strip_doc_string,
+            batch_size=batch_size)
 
 
 # ONNX can't handle constants that are lists of tensors, which can
@@ -152,7 +153,8 @@ def _split_tensor_list_constants(g, block):
                 node.output().replaceAllUsesWith(lc)
 
 
-def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=False):
+def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=False,
+                    batch_size=None):
     # Remove fork/wait nodes
     torch._C._jit_pass_inline_fork_wait(graph)
     torch._C._jit_pass_dce(graph)
@@ -187,9 +189,17 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
     torch._C._jit_pass_lint(graph)
 
     if operator_export_type != OperatorExportTypes.RAW:
+        print('=========Before ONNX pass===========')
+        print(graph)
+        print('====================================')
         graph = torch._C._jit_pass_onnx(graph, operator_export_type)
         torch._C._jit_pass_lint(graph)
-        torch._C._jit_pass_onnx_peephole(graph)
+        print('=========Before ONNX peephole pass===========')
+        print(graph)
+        print('=============================================')
+        import pdb
+        pdb.set_trace()
+        torch._C._jit_pass_onnx_peephole(graph, batch_size if batch_size is not None else 0)
         torch._C._jit_pass_lint(graph)
     torch._C._jit_pass_dce(graph)
     torch._C._jit_pass_lint(graph)
@@ -238,8 +248,9 @@ def _model_to_graph(model, args, verbose=False, training=False,
                     operator_export_type=OperatorExportTypes.ONNX,
                     example_outputs=None, propagate=False,
                     _retain_param_name=False, do_constant_folding=False,
-                    _disable_torch_constant_prop=False):
+                    _disable_torch_constant_prop=False, batch_size=None):
     from torch.onnx.symbolic_helper import _export_onnx_opset_version
+
     # Special case for common case of passing a single Tensor
     if isinstance(args, torch.Tensor):
         args = (args, )
@@ -277,7 +288,8 @@ def _model_to_graph(model, args, verbose=False, training=False,
                     inp.setUniqueName(param_names[i - user_input_num])
 
     graph = _optimize_graph(graph, operator_export_type,
-                            _disable_torch_constant_prop=_disable_torch_constant_prop)
+                            _disable_torch_constant_prop=_disable_torch_constant_prop,
+                            batch_size=batch_size)
 
     # NB: ONNX requires complete information about output types, which might be
     # erased by some optimizations, so we need to set it explicitly again.
@@ -310,7 +322,7 @@ def export_to_pretty_string(model, args, f, export_params=True, verbose=False, t
                             input_names=None, output_names=None, aten=False, export_raw_ir=False,
                             operator_export_type=None, export_type=ExportTypes.PROTOBUF_FILE,
                             example_outputs=None, propagate=False, google_printer=False,
-                            opset_version=None, _retain_param_name=True):
+                            opset_version=None, _retain_param_name=True, batch_size=None):
     if aten or export_raw_ir:
         assert operator_export_type is None
         assert aten ^ export_raw_ir
@@ -320,14 +332,14 @@ def export_to_pretty_string(model, args, f, export_params=True, verbose=False, t
     return _export_to_pretty_string(model, args, f, export_params, verbose, training,
                                     input_names, output_names, operator_export_type,
                                     export_type, example_outputs, propagate, google_printer,
-                                    opset_version, _retain_param_name)
+                                    opset_version, _retain_param_name, False, batch_size)
 
 
 def _export_to_pretty_string(model, args, f, export_params=True, verbose=False, training=False,
                              input_names=None, output_names=None, operator_export_type=OperatorExportTypes.ONNX,
                              export_type=ExportTypes.PROTOBUF_FILE, example_outputs=None, propagate=False,
                              google_printer=False, opset_version=None, _retain_param_name=False,
-                             do_constant_folding=False):
+                             do_constant_folding=False, batch_size=None):
     from torch.onnx.symbolic_helper import _default_onnx_opset_version, _set_opset_version
     if opset_version is None:
         opset_version = _default_onnx_opset_version
@@ -336,7 +348,7 @@ def _export_to_pretty_string(model, args, f, export_params=True, verbose=False, 
                                                     training, input_names,
                                                     output_names, operator_export_type,
                                                     example_outputs, propagate, _retain_param_name,
-                                                    do_constant_folding)
+                                                    do_constant_folding, batch_size)
 
     return graph._pretty_print_onnx(params_dict, opset_version, False, operator_export_type, google_printer)
 
@@ -349,7 +361,7 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
             input_names=None, output_names=None, operator_export_type=OperatorExportTypes.ONNX,
             export_type=ExportTypes.PROTOBUF_FILE, example_outputs=None, propagate=False,
             opset_version=None, _retain_param_name=False, do_constant_folding=False,
-            strip_doc_string=True):
+            strip_doc_string=True, batch_size=None):
     global __IN_ONNX_EXPORT
     assert __IN_ONNX_EXPORT is False
     __IN_ONNX_EXPORT = True
@@ -362,7 +374,8 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
                                                         training, input_names,
                                                         output_names, operator_export_type,
                                                         example_outputs, propagate,
-                                                        _retain_param_name, do_constant_folding)
+                                                        _retain_param_name, do_constant_folding,
+                                                        False, batch_size)
 
         # TODO: Don't allocate a in-memory string for the protobuf
         defer_weight_export = export_type is not ExportTypes.PROTOBUF_FILE
