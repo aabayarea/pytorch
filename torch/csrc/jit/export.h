@@ -32,7 +32,8 @@ TORCH_API std::tuple<std::string, RawDataExportMap> export_onnx(
     bool strip_doc_string = true,
     bool keep_initializers_as_inputs = true,
     const std::map<std::string, int>& custom_opsets = {},
-    bool add_node_names = true);
+    bool add_node_names = true,
+    bool use_large_model_format = false);
 
 // For testing purposes
 TORCH_API std::string pretty_print_onnx(

@@ -133,7 +133,8 @@ class EncoderBase {
       const std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>& dynamic_axes =
         std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>(),
       bool keep_initializers_as_inputs = true,
-      bool add_node_names = true);
+      bool add_node_names = true,
+      bool use_large_model_format = false);
 
   void EncodeBlock(
       onnx::GraphProto* graph_proto,
@@ -143,12 +144,14 @@ class EncoderBase {
       const std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>& dynamic_axes =
         std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>(),
       bool keep_initializers_as_inputs = true,
-      bool add_node_names = true);
+      bool add_node_names = true,
+      bool use_large_model_format = false);
 
   virtual void EncodeTensor(
       onnx::TensorProto* tensor_proto,
       const at::Tensor& tensor,
-      const c10::optional<std::string> external_ref = {}) = 0;
+      const c10::optional<std::string> external_ref = {},
+      const bool use_large_model_format = false) = 0;
 
   virtual void EncodeIntermediateValueInfo(
       onnx::GraphProto* graph_proto,
@@ -262,9 +265,10 @@ void EncoderBase::EncodeGraph(
     const std::map<std::string, at::Tensor>& initializers,
     const std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>& dynamic_axes,
     bool keep_initializers_as_inputs,
-    bool add_node_names) {
+    bool add_node_names,
+    bool use_large_model_format) {
   EncodeBlock(graph_proto, graph->block(), initializers, dynamic_axes,
-              keep_initializers_as_inputs, add_node_names);
+              keep_initializers_as_inputs, add_node_names, use_large_model_format);
 }
 
 void EncoderBase::EncodeBlock(
@@ -273,7 +277,8 @@ void EncoderBase::EncodeBlock(
     const std::map<std::string, at::Tensor>& initializers,
     const std::unordered_map<std::string, std::unordered_map<int64_t, std::string>>& dynamic_axes,
     bool keep_initializers_as_inputs,
-    bool add_node_names) {
+    bool add_node_names,
+    bool use_large_model_format) {
   AT_ASSERT(graph_proto != nullptr);
   std::string block_name = "torch-jit-export";
   if (num_blocks_) {
@@ -396,10 +401,15 @@ void EncoderBase::EncodeBlock(
     }
   }
   AT_ASSERT(block->inputs().size() >= initializers.size());
+  printf("Names of all parameters are -------- \n");
+  for (const auto& p : initializers ) {
+    std::cout << p.first << std::endl;
+  }
+  printf("------------------------------------- \n");
   for (auto& name_tensor_pair : initializers) {
     auto p = graph_proto->add_initializer();
     p->set_name(name_tensor_pair.first);
-    EncodeTensor(p, name_tensor_pair.second, name_tensor_pair.first);
+    EncodeTensor(p, name_tensor_pair.second, name_tensor_pair.first, use_large_model_format);
   }
 }
 
@@ -479,7 +489,8 @@ class GraphEncoder : public EncoderBase {
       bool strip_doc,
       bool keep_initializers_as_inputs,
       const std::map<std::string, int>& custom_opsets,
-      bool add_node_names);
+      bool add_node_names,
+      bool use_large_model_format);
 
   RawDataExportMap get_raw_data_export_map() {
     return raw_data_export_map_;
@@ -489,7 +500,8 @@ class GraphEncoder : public EncoderBase {
   void EncodeTensor(
       onnx::TensorProto* tensor_proto,
       const at::Tensor& tensor,
-      const c10::optional<std::string> external_ref = {}) override;
+      const c10::optional<std::string> external_ref = {},
+      const bool use_large_model_format = false) override;
 
   RawDataExportMap raw_data_export_map_;
   bool defer_weight_export_;
@@ -505,7 +517,8 @@ GraphEncoder::GraphEncoder(
     bool strip_doc,
     bool keep_initializers_as_inputs,
     const std::map<std::string, int>& custom_opsets,
-    bool add_node_names)
+    bool add_node_names,
+    bool use_large_model_format)
     : EncoderBase(operator_export_type, strip_doc),
       defer_weight_export_(defer_weight_export) {
   if (operator_export_type != onnx_torch::OperatorExportTypes::RAW) {
@@ -517,7 +530,7 @@ GraphEncoder::GraphEncoder(
   imp->set_version(onnx_opset_version);
 
   EncodeGraph(model_proto_.mutable_graph(), graph, initializers, dynamic_axes,
-              keep_initializers_as_inputs, add_node_names);
+              keep_initializers_as_inputs, add_node_names, use_large_model_format);
 
   for (const std::string& domain : domains_) {
     auto* opset = model_proto_.add_opset_import();
@@ -542,7 +555,8 @@ GraphEncoder::GraphEncoder(
 void GraphEncoder::EncodeTensor(
     onnx::TensorProto* tensor_proto,
     const at::Tensor& tensor,
-    const c10::optional<std::string> external_ref) {
+    const c10::optional<std::string> external_ref,
+    const bool use_large_model_format) {
   for (auto d : tensor.sizes()) {
     tensor_proto->add_dims(d);
   }
@@ -557,6 +571,12 @@ void GraphEncoder::EncodeTensor(
   else {
     t = tensor.contiguous().cpu();
   }
+
+  // Either defer_weight_export should be true (and external_ref must be present)
+  // or use_large_model_format should be true, not both at the same time. They can
+  // both be false at the same time.
+  AT_ASSERT(!((defer_weight_export_ && external_ref) && use_large_model_format));
+
   // Add a buffer to the raw_data_export_map for the caller to dump into an
   // external data store. If external_ref is not specified, we instead dump
   // the contiguous data into the protobuf itself
@@ -569,8 +589,19 @@ void GraphEncoder::EncodeTensor(
     tensor_proto->set_raw_data("__EXTERNAL");
   } else {
     AT_ASSERT(t.is_contiguous());
-    tensor_proto->set_raw_data(std::string(
+    if (use_large_model_format) {
+      printf("The external parameter file name is %s.\n", external_ref.value().c_str());
+      FILE* fp = fopen(external_ref.value().c_str(), "wb");
+      fwrite(t.data_ptr(), t.element_size(), t.numel(), fp);
+      onnx::StringStringEntryProto* location = tensor_proto->mutable_external_data()->Add();
+      location->set_key("location");
+      location->set_value(external_ref.value());
+      tensor_proto->set_data_location(onnx::TensorProto_DataLocation_EXTERNAL);
+    }
+    else {
+      tensor_proto->set_raw_data(std::string(
         static_cast<char*>(t.data_ptr()), t.element_size() * t.numel()));
+    }
   }
 }
 
@@ -771,7 +802,8 @@ std::string pretty_print_onnx(
       true,
       keep_initializers_as_inputs,
       custom_opsets,
-      add_node_names);
+      add_node_names,
+      false);
   if (google_printer) {
     return graph_encoder.get_model_proto().DebugString();
   }
@@ -793,7 +825,8 @@ std::tuple<std::string, RawDataExportMap> export_onnx(
     bool strip_doc_string,
     bool keep_initializers_as_inputs,
     const std::map<std::string, int>& custom_opsets,
-    bool add_node_names) {
+    bool add_node_names,
+    bool use_large_model_format) {
   auto graph_encoder = GraphEncoder(
       graph,
       onnx_opset_version,
@@ -804,7 +837,8 @@ std::tuple<std::string, RawDataExportMap> export_onnx(
       strip_doc_string,
       keep_initializers_as_inputs,
       custom_opsets,
-      add_node_names);
+      add_node_names,
+      use_large_model_format);
   return std::make_tuple(
       graph_encoder.get_model_proto().SerializeAsString(),
       graph_encoder.get_raw_data_export_map());
