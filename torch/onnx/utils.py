@@ -488,12 +488,12 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
             proto, export_map = graph._export_onnx(
                 params_dict, opset_version, dynamic_axes, defer_weight_export,
                 operator_export_type, strip_doc_string, val_keep_init_as_ip, custom_opsets,
-                val_add_node_names, val_use_large_model_format)
+                val_add_node_names, val_use_large_model_format, f)
         else:
             proto, export_map = graph._export_onnx(
                 {}, opset_version, dynamic_axes, False, operator_export_type,
                 strip_doc_string, val_keep_init_as_ip, custom_opsets, val_add_node_names,
-                val_use_large_model_format)
+                val_use_large_model_format, f)
 
         if export_type == ExportTypes.PROTOBUF_FILE:
             assert(len(export_map) == 0)
