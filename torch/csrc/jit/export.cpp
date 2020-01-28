@@ -623,11 +623,12 @@ void GraphEncoder::EncodeTensor(
     tensor_proto->set_raw_data("__EXTERNAL");
   } else {
     AT_ASSERT(t.is_contiguous());
+    printf("The parameter name that is considered is %s.\n", external_ref.value().c_str());
     if (use_large_model_format && 
         std::accumulate(std::begin(tensor.sizes()), std::end(tensor.sizes()),
         1, std::multiplies<size_t>()) > ParamSizeThresholdForExternalStorage) {
       AT_ASSERT(!onnx_file_path.empty());
-      printf("The external parameter file name is %s.\n", external_ref.value().c_str());
+      printf("The external parameter file name that is saved is %s.\n", external_ref.value().c_str());
       auto folder = GetFileRootPath(onnx_file_path);
       auto tensorName = external_ref.value();
       const std::string illegalChars = "\\/:?\"<>|";

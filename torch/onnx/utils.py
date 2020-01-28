@@ -482,8 +482,7 @@ def _export(model, args, f, export_params=True, verbose=False, training=False,
             custom_opsets = {}
 
         _validate_dynamic_axes(dynamic_axes, model, input_names, output_names)
-        import pdb
-        pdb.set_trace()
+
         if export_params:
             proto, export_map = graph._export_onnx(
                 params_dict, opset_version, dynamic_axes, defer_weight_export,
