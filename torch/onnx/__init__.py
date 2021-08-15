@@ -32,7 +32,7 @@ def export(model, args, f, export_params=True, verbose=False, training=False,
            operator_export_type=None, opset_version=None, _retain_param_name=True,
            do_constant_folding=True, example_outputs=None, strip_doc_string=True,
            dynamic_axes=None, keep_initializers_as_inputs=None, custom_opsets=None,
-           use_large_model_format=False):
+           use_large_model_format=True):
     r"""
     Export a model into ONNX format.  This exporter runs your model
     once in order to get a trace of its execution to be exported;
